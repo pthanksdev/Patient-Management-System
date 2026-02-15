@@ -1,28 +1,114 @@
 ﻿# Patient Management System (Backend)
 
-Microservices-based backend for a patient management platform, built with Spring Boot and focused on service-to-service communication, security, and event-driven workflows.
+A microservices backend for patient lifecycle management with secure API access, synchronous service-to-service communication, and asynchronous event processing.
 
-## Architecture
+## Table of Contents
 
-This repository contains the following services:
+- [Overview](#overview)
+- [System Architecture](#system-architecture)
+- [Service Map](#service-map)
+- [Data and Communication Flow](#data-and-communication-flow)
+- [Tech Stack](#tech-stack)
+- [Repository Layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [Configuration](#configuration)
+- [Run the System](#run-the-system)
+- [API Guide](#api-guide)
+- [Testing](#testing)
+- [Biome](#biome)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap Ideas](#roadmap-ideas)
+- [License](#license)
 
-- `api-gateway` (port `4004`): Entry point for clients, routes requests and validates JWT.
-- `auth-service` (port `4005`): Login endpoint, JWT generation, token validation.
-- `patient-service` (port `4000`): Patient CRUD, publishes events, calls billing via gRPC.
-- `billing-service` (HTTP `4001`, gRPC `9001`): Receives patient billing account creation requests via gRPC.
-- `analytics-service` (default Spring Boot port unless overridden): Kafka consumer for patient events.
-- `integration-tests`: End-to-end tests against the gateway.
+## Overview
 
-### Runtime flow
+This system is composed of Spring Boot services behind an API Gateway:
 
-1. Client logs in through gateway: `POST /auth/login`.
-2. Gateway forwards to `auth-service`.
-3. Client calls protected patient API: `GET|POST|PUT|DELETE /api/patients...`.
-4. Gateway runs `JwtValidation` filter (`auth-service /validate`).
-5. `patient-service` persists patient data, calls `billing-service` via gRPC, and sends Kafka event.
-6. `analytics-service` consumes the Kafka patient event.
+- `auth-service` issues and validates JWT tokens.
+- `api-gateway` handles external routing and protects patient endpoints.
+- `patient-service` owns patient CRUD.
+- `billing-service` creates billing accounts via gRPC.
+- `analytics-service` consumes patient events from Kafka.
 
-## Tech stack
+## System Architecture
+
+### Graphical (Mermaid)
+
+```mermaid
+flowchart LR
+    C[Client / Frontend] -->|HTTP| G[API Gateway :4004]
+
+    G -->|/auth/*| A[Auth Service :4005]
+    G -->|/api/patients/* + JWT filter| P[Patient Service :4000]
+
+    P -->|gRPC :9001| B[Billing Service]
+    P -->|Kafka topic: patient| K[(Kafka Broker)]
+    K -->|consume| AN[Analytics Service]
+
+    P --> DBP[(Patient DB)]
+    A --> DBA[(Auth DB)]
+```
+
+### Graphical (ASCII)
+
+```text
+Client
+  |
+  | HTTP
+  v
+API Gateway (4004)
+  |---- /auth/* ----------------------------> Auth Service (4005) ----> Auth DB
+  |
+  |---- /api/patients/* + JWT Validation ---> Patient Service (4000) --> Patient DB
+                                                |\
+                                                | \-- gRPC (9001) ---> Billing Service
+                                                |
+                                                \---- Kafka topic "patient" ---> Analytics Service
+```
+
+## Service Map
+
+| Service | Purpose | Default Port(s) | Key Dependency |
+|---|---|---|---|
+| `api-gateway` | External entry point and route protection | `4004` | `auth-service` |
+| `auth-service` | Login + JWT validation | `4005` | `JWT_SECRET`, DB |
+| `patient-service` | Patient CRUD and domain orchestration | `4000` | `billing-service`, Kafka, DB |
+| `billing-service` | Billing account creation over gRPC | HTTP `4001`, gRPC `9001` | gRPC consumers |
+| `analytics-service` | Kafka event consumer | Spring Boot default unless set (`4002` in Dockerfile) | Kafka |
+| `integration-tests` | End-to-end API tests | N/A | Running services |
+
+## Data and Communication Flow
+
+### Login + Protected Request (Sequence)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant G as API Gateway
+    participant A as Auth Service
+    participant P as Patient Service
+
+    U->>G: POST /auth/login
+    G->>A: Forward /login
+    A-->>G: JWT token
+    G-->>U: 200 + token
+
+    U->>G: GET /api/patients + Bearer token
+    G->>A: GET /validate
+    A-->>G: 200 valid
+    G->>P: Forward /patients
+    P-->>G: patient list
+    G-->>U: 200 response
+```
+
+### Create Patient Domain Side Effects
+
+1. `patient-service` validates and persists patient.
+2. Calls `billing-service` via gRPC to create billing account.
+3. Publishes `PATIENT_CREATED` protobuf event to Kafka topic `patient`.
+4. `analytics-service` consumes and logs/processes the event.
+
+## Tech Stack
 
 - Java `17`
 - Spring Boot `3.5.7`
@@ -31,37 +117,38 @@ This repository contains the following services:
 - Spring Data JPA
 - gRPC + Protocol Buffers
 - Kafka
-- H2 (local/dev defaults) and PostgreSQL dependency for external DB usage
+- H2 and PostgreSQL drivers
 - Maven
 
-## Repository structure
+## Repository Layout
 
 ```text
 .
 |-- api-gateway/
+|   `-- src/main/resources/application.yml
 |-- auth-service/
 |-- patient-service/
 |-- billing-service/
 |-- analytics-service/
 |-- integration-tests/
-|-- api-requests/         # HTTP request samples
-`-- grpc-requests/        # gRPC request sample files
+|-- api-requests/       # REST client samples
+|-- grpc-requests/      # gRPC request samples
+|-- README.md
+`-- biome.json
 ```
 
 ## Prerequisites
 
-- Java `17+` installed and on `PATH`
-- Maven `3.9+` (or use each module's `mvnw` / `mvnw.cmd`)
-- Kafka running for event flow (`patient-service` producer + `analytics-service` consumer)
+- Java `17+`
+- Maven `3.9+` (or `mvnw`/`mvnw.cmd` per service)
+- Kafka broker reachable from services
 
 Optional:
-- PostgreSQL if you want external DB instead of embedded defaults
+- PostgreSQL (if you choose external DB config)
 
-## Required environment variables
+## Configuration
 
-Some properties are expected at runtime and are not fully defined in committed `application.properties`.
-
-Set these before running:
+### Required environment variables
 
 ```powershell
 $env:AUTH_SERVICE_URL="http://localhost:4005"
@@ -69,17 +156,24 @@ $env:JWT_SECRET="REPLACE_WITH_BASE64_ENCODED_SECRET"
 $env:SPRING_KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
 ```
 
+### Property mapping reference
+
+| Env var | Used by | Property key |
+|---|---|---|
+| `AUTH_SERVICE_URL` | `api-gateway` | `auth.service.url` |
+| `JWT_SECRET` | `auth-service` | `jwt.secret` |
+| `SPRING_KAFKA_BOOTSTRAP_SERVERS` | `patient-service`, `analytics-service` | `spring.kafka.bootstrap-servers` |
+| `BILLING_SERVICE_ADDRESS` (optional) | `patient-service` | `billing.service.address` |
+| `BILLING_SERVICE_GRPC_PORT` (optional) | `patient-service` | `billing.service.grpc.port` |
+| `SERVER_PORT` (optional) | any service | `server.port` |
+
 Notes:
-- `api-gateway` expects `auth.service.url` (map from `AUTH_SERVICE_URL`).
-- `auth-service` expects `jwt.secret` (map from `JWT_SECRET`). It must be Base64-encoded and long enough for HMAC signing.
-- Kafka bootstrap servers should be set for `patient-service` and `analytics-service`.
-- `patient-service` gRPC billing target defaults to `localhost:9001` via:
-  - `billing.service.address` (default `localhost`)
-  - `billing.service.grpc.port` (default `9001`)
+- `JWT_SECRET` must be Base64 and strong enough for HMAC signing.
+- gRPC defaults are `localhost:9001` when billing overrides are not set.
 
-## Running locally
+## Run the System
 
-Start services in this order to avoid startup/runtime dependency errors.
+### Recommended startup order
 
 1. `auth-service`
 2. `billing-service`
@@ -87,7 +181,7 @@ Start services in this order to avoid startup/runtime dependency errors.
 4. `analytics-service`
 5. `api-gateway`
 
-Example (PowerShell, from repo root):
+### PowerShell commands (from repo root)
 
 ```powershell
 cd .\auth-service; .\mvnw.cmd spring-boot:run
@@ -97,9 +191,13 @@ cd ..\analytics-service; .\mvnw.cmd spring-boot:run
 cd ..\api-gateway; .\mvnw.cmd spring-boot:run
 ```
 
-## API usage
+### Dockerfiles
 
-All client-facing calls should go through gateway at `http://localhost:4004`.
+Each service has a Dockerfile, but there is currently no root `docker-compose.yml` in this repository.
+
+## API Guide
+
+Base URL (gateway): `http://localhost:4004`
 
 ### 1) Login
 
@@ -112,11 +210,9 @@ All client-facing calls should go through gateway at `http://localhost:4004`.
 }
 ```
 
-The seeded auth user is created from `auth-service/src/main/resources/data.sql`.
+### 2) Validate token
 
-### 2) Get patients (protected)
-
-`GET /api/patients`
+`GET /auth/validate`
 
 Header:
 
@@ -124,7 +220,11 @@ Header:
 Authorization: Bearer <token>
 ```
 
-### 3) Create patient (protected)
+### 3) Get patients
+
+`GET /api/patients`
+
+### 4) Create patient
 
 `POST /api/patients`
 
@@ -138,35 +238,57 @@ Authorization: Bearer <token>
 }
 ```
 
-## API docs
+### 5) Update patient
 
-- Patient OpenAPI through gateway: `http://localhost:4004/api-docs/patients`
-- Auth OpenAPI through gateway: `http://localhost:4004/api-docs/auth`
+`PUT /api/patients/{id}`
+
+```json
+{
+  "name": "John Doe",
+  "email": "john.updated@demo.com",
+  "address": "123 Main St",
+  "dateOfBirth": "1995-09-09"
+}
+```
+
+### 6) Delete patient
+
+`DELETE /api/patients/{id}`
+
+### API docs
+
+- Patient docs through gateway: `http://localhost:4004/api-docs/patients`
+- Auth docs through gateway: `http://localhost:4004/api-docs/auth`
+
+### Seeded credentials
+
+Default seeded login user exists in `auth-service/src/main/resources/data.sql`:
+
+- Email: `testuser@test.com`
+- Password: `password123`
 
 ## Testing
 
-### Unit tests
-
-Run per service:
+### Unit tests (per module)
 
 ```powershell
 cd .\patient-service; .\mvnw.cmd test
 ```
 
+Repeat for `auth-service`, `billing-service`, `analytics-service`, `api-gateway`.
+
 ### Integration tests
 
-`integration-tests` assumes the system is already running (especially gateway on `4004`).
+`integration-tests` expects all required services already running.
 
 ```powershell
 cd .\integration-tests
 mvn test
 ```
 
-## Biome (repo formatting/linting)
+## Biome
 
-This repository includes a root `biome.json` for consistent lint/format on supported file types (for example JSON/JSONC/JavaScript if added).
-
-Run without installing globally:
+Biome configuration exists at `biome.json` and is intended for non-Java files (JSON, JSONC, JS/TS if added later).
 
 ```powershell
 npx @biomejs/biome check .
@@ -175,18 +297,25 @@ npx @biomejs/biome format --write .
 
 ## Troubleshooting
 
-- `401 Unauthorized` from patient routes:
-  - Ensure `Authorization: Bearer <token>` is sent.
-  - Ensure `AUTH_SERVICE_URL` points to running `auth-service`.
-- Gateway startup failure for missing property:
+- `401 Unauthorized` on `/api/patients`:
+  - Verify `Authorization: Bearer <token>` header.
+  - Verify `AUTH_SERVICE_URL` points to active `auth-service`.
+- Gateway fails with missing `auth.service.url`:
   - Set `AUTH_SERVICE_URL`.
-- Auth startup failure for JWT:
-  - Set valid Base64 `JWT_SECRET`.
+- Auth fails to start or token ops fail:
+  - Set a valid Base64 `JWT_SECRET`.
 - Kafka publish/consume issues:
-  - Verify `SPRING_KAFKA_BOOTSTRAP_SERVERS` and broker availability.
-- gRPC connection refused in `patient-service`:
-  - Ensure `billing-service` is running and listening on port `9001`.
+  - Check `SPRING_KAFKA_BOOTSTRAP_SERVERS` and broker health.
+- gRPC errors from `patient-service` to billing:
+  - Confirm billing gRPC server available at `localhost:9001` or your override.
+
+## Roadmap Ideas
+
+- Add root `docker-compose.yml` for one-command local environment.
+- Add centralized config and service discovery.
+- Add distributed tracing (OpenTelemetry) and metrics dashboards.
+- Add CI pipeline for build + tests + lint checks.
 
 ## License
 
-Add your project license here (for example MIT/Apache-2.0).
+Add your license text or SPDX identifier (for example `MIT` or `Apache-2.0`).
